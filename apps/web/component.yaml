@@ -1,0 +1,113 @@
+apiVersion: sourceplane.io/v1
+kind: Component
+metadata:
+  name: web
+  description: The docs site (Docusaurus 3, built fully static and served as Cloudflare Workers + Static Assets behind one Worker, per environment)
+spec:
+  type: cloudflare-workers-assets-turbo
+  lifecycle: production
+  owner: platform
+  # Its pages, attached to it in the workspace's catalog: what the Docs
+  # library shows for it, and what the catalog's docs and runbook checks read.
+  # Generated from what this manifest and its sources declare.
+  docs:
+    overview: docs/overview.md
+    pages:
+      - { path: docs/architecture.md, role: architecture, title: Architecture }
+      - { path: docs/runbook.md, role: runbook, title: Runbook }
+  # `app`, not `web`: a domain and a component share one name space in the
+  # catalog, and a domain called `web` hid this component from it.
+  domain: app
+  path: apps/web
+  # Its own lane per environment: the site's build is the longest job in the
+  # plan, and a shared lane would wait on it.
+  lane: isolated
+  subscribe:
+    environments:
+      - name: dev
+        profile: verify
+      - name: stage
+        profile: verify
+        profileRules:
+          - profile: deploy
+            when:
+              triggerRef: github-push-main
+      - name: prod
+        profile: verify
+        profileRules:
+          - profile: deploy
+            when:
+              triggerRef: github-push-main
+  # How the site runs itself for orun.work's live Preview tab
+  # (saas-parallel-baselining PB4): `orun preview` starts this, and a coding
+  # session keeps it running while it works, so the person watches it change
+  # as it is built. The dev server binds the box's loopback only, on a fixed
+  # port, and installs first, so a checkout the session has not installed yet
+  # still comes up.
+  # docusaurus start exits rather than moving to another port when 3000 is
+  # taken (it offers another port only at a terminal). Its dev server already
+  # accepts any Host and Origin (allowedHosts: 'all'), so the hot reload
+  # socket connects from the preview's host with no change to
+  # docusaurus.config.js.
+  preview:
+    run:
+      - sh
+      - -c
+      - pnpm install --frozen-lockfile --prefer-offline --filter "@app/web..." && exec node_modules/.bin/docusaurus start --host 127.0.0.1 --port 3000 --no-open
+    port: 3000
+    path: /
+    env:
+      NODE_OPTIONS: --max-old-space-size=1024
+  parameters:
+    nodeVersion: "22"
+    pnpmVersion: "10.12.1"
+
+    workspaceDir: ../..
+    appDir: .
+
+    turboFilter: "@app/web"
+    # The config the dry run and the deploy hand to wrangler: the Worker
+    # (worker/index.ts) and the static build in build/ as its assets.
+    # The site builds fully static, so there is no adapter and no generated
+    # config — this committed file is the one wrangler deploys.
+    wranglerConfig: wrangler.jsonc
+
+    # `docusaurus build` writes every docs page, blog post, tag page, the
+    # feeds, the sitemap and the 404 page to build/. The Worker is a source
+    # file wrangler bundles at deploy; the lane checks it exists after the
+    # build like any entry.
+    workerEntrypoint: worker/index.ts
+    assetsDir: build
+
+    # Per-env worker name: docusaurus-docs-web-{dev,stage,prod}.
+    workerName: docusaurus-docs-web
+    environmentAwareWorkerName: true
+
+    # The account's workers.dev subdomain; exported to the smoke step as
+    # ${WORKERS_DEV_SUBDOMAIN} and used to build ${DEPLOYED_URL}.
+    workersDevSubdomain: vijayakrishnan12994
+
+    installCommand: pnpm install --frozen-lockfile
+    # The site's public origin (canonical links, the sitemap and the blog's
+    # RSS and Atom feeds are absolute): the environment's SITE_URL when
+    # intent.yaml sets one (a custom domain), else its workers.dev URL. The
+    # subdomain is written out rather than read from ${WORKERS_DEV_SUBDOMAIN},
+    # which the composition exports to the smoke step only.
+    # ${ORUN_ENVIRONMENT} the runner sets for every step. docusaurus.config.js
+    # reads PUBLIC_SITE_URL as the config's `url`.
+    buildCommand: PUBLIC_SITE_URL="${SITE_URL:-https://docusaurus-docs-web-${ORUN_ENVIRONMENT}.vijayakrishnan12994.workers.dev}" pnpm exec turbo run build --filter=@app/web
+
+    # Smoke: the home page is the template's (its "Docusaurus Tutorial - 5min"
+    # call to action — not the site's name, which is the owner's to change and
+    # HTML-escaped when it carries an `&` or `'`), the tutorial's first page
+    # answers, the blog's RSS feed is served, and an unknown path answers the
+    # site's own 404 page with a 404 status (served by the assets through the
+    # Worker). Each response is buffered before grep so an early match cannot
+    # SIGPIPE curl.
+    smokeCommand: "html=$(curl -sfL \"${DEPLOYED_URL}/\") && echo \"${html}\" | grep -q 'Docusaurus Tutorial - 5min' && doc=$(curl -sfL \"${DEPLOYED_URL}/docs/intro\") && echo \"${doc}\" | grep -q 'Tutorial Intro' && feed=$(curl -sfL \"${DEPLOYED_URL}/blog/rss.xml\") && echo \"${feed}\" | grep -q '<rss' && test \"$(curl -s -o /dev/null -w '%{http_code}' \"${DEPLOYED_URL}/no-such-page\")\" = 404"
+  labels:
+    team: platform
+    layer: delivery
+    surface: web
+    runtime: cloudflare
+# orun: redeploy 01-product as_12cad1a8ac994796927b
